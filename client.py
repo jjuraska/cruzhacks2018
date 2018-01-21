@@ -3,6 +3,7 @@ import json
 import platform
 import asyncio
 import websockets
+import urllib
 
 import utils
 
@@ -33,10 +34,24 @@ class SpeechClient:
         self.received_messages = []
         self.metrics = []
 
+        self.ws = None
+
+
+    def reset(self):
+        self.uuid = utils.generate_id()
+        self.request_id = utils.generate_id()
+
+        self.num_turns = 0
+        self.is_ongoing_turn = False
+        self.cur_hypothesis = ''
+        self.phrase = ''
+        self.received_messages = []
+        self.metrics = []
+
 
     # ---- PUBLIC METHODS ----
 
-    async def speech_to_text(self, language, response_format, recognition_mode, audio_file_path):
+    async def connect_to_speech_api(self, language, response_format, recognition_mode):
         self.language = language
         self.response_format = response_format
         self.recognition_mode = recognition_mode
@@ -61,32 +76,40 @@ class SpeechClient:
             'Start': utils.generate_timestamp()
         })
 
-        # request a WebSocket connection to the Bing Speech API
-        async with websockets.client.connect(url, extra_headers=headers) as ws:
-            # TODO: catch connection errors, and add Connection failure telemetry for error cases
+        try:
+            # request a WebSocket connection to the speech API
+            self.ws = await websockets.client.connect(url, extra_headers=headers)
+        except websockets.exceptions.InvalidHandshake as err:
+            print('Handshake error: {0}'.format(err))
+            return
+        # TODO: add Connection failure telemetry for error cases
 
-            # record the Connection metric telemetry data
-            self.metrics[-1]['End'] = utils.generate_timestamp()
+        # record the Connection metric telemetry data
+        self.metrics[-1]['End'] = utils.generate_timestamp()
 
-            # try:
-            #     ws.handshake(url, origin='https://speech.platform.bing.com')
-            # except websockets.exceptions.InvalidHandshake as e:
-            #     print('Handshake error: {0}'.format(e))
-
-            # send the speech.config message
-            await self.send_speech_config_msg(ws)
-
-            # perform the sending and receiving via the WebSocket concurrently
-            sending_task = asyncio.ensure_future(self.send_audio_msg(ws, audio_file_path))
-            receiving_task = asyncio.ensure_future(self.process_response(ws))
-            # wait for both the tasks to complete
-            await asyncio.wait(
-                [sending_task, receiving_task],
-                return_when=asyncio.ALL_COMPLETED,
-            )
+        # send the speech.config message
+        await self.send_speech_config_msg()
 
 
-    async def send_speech_config_msg(self, ws):
+    async def disconnect(self):
+        await self.ws.close()
+
+
+    async def speech_to_text(self, audio_file_path):
+        # perform the sending and receiving via the WebSocket concurrently
+        sending_task = asyncio.ensure_future(self.send_audio_msg(audio_file_path))
+        receiving_task = asyncio.ensure_future(self.process_response())
+
+        # wait for both the tasks to complete
+        await asyncio.wait(
+            [sending_task, receiving_task],
+            return_when=asyncio.ALL_COMPLETED,
+        )
+
+        return self.phrase
+
+
+    async def send_speech_config_msg(self):
         # assemble the payload for the speech.config message
         context = {
             'system': {
@@ -115,10 +138,10 @@ class SpeechClient:
         # DEBUG PRINT
         # print('>>', msg)
 
-        await ws.send(msg)
+        await self.ws.send(msg)
 
 
-    async def send_audio_msg(self, ws, audio_file_path):
+    async def send_audio_msg(self, audio_file_path):
         # open the binary audio file
         with open(audio_file_path, 'rb') as f_audio:
             num_chunks = 0
@@ -144,7 +167,7 @@ class SpeechClient:
                 sys.stdout.flush()
 
                 try:
-                    await ws.send(msg)
+                    await self.ws.send(msg)
                     # DEBUG CONCURRENCY
                     # await asyncio.sleep(0.1)
                 except websockets.exceptions.ConnectionClosed as e:
@@ -152,7 +175,7 @@ class SpeechClient:
                     return
 
 
-    async def send_telemetry_data(self, ws, is_first_turn=False):
+    async def send_telemetry_msg(self, is_first_turn=False):
         # assemble the payload for the telemetry message
         payload = {
             'ReceivedMessages': self.received_messages
@@ -173,16 +196,16 @@ class SpeechClient:
         sys.stdout.flush()
 
         try:
-            await ws.send(msg)
+            await self.ws.send(msg)
         except websockets.exceptions.ConnectionClosed as e:
             print('Connection closed: {0}'.format(e))
             return
 
 
-    async def process_response(self, ws):
+    async def process_response(self):
         while True:
             try:
-                response = await ws.recv()
+                response = await self.ws.recv()
                 # DEBUG PRINT
                 print('<<', utils.generate_timestamp() + '\r\n' + response)
                 sys.stdout.flush()
@@ -194,7 +217,6 @@ class SpeechClient:
             response_path = utils.parse_header_value(response, 'Path')
             if response_path is None:
                 print('Error: invalid response header.')
-                ws.close()
                 return
 
             # record the telemetry data for received messages
@@ -208,41 +230,34 @@ class SpeechClient:
             elif response_path == 'speech.hypothesis':
                 response_dict = utils.parse_body_json(response)
                 if response_dict is None:
-                    print('Error: no body found in the response. Closing connection.')
-                    ws.close()
+                    print('Error: no body found in the response.')
                     return
                 if 'Text' not in response_dict:
-                    print('Error: unexpected response header. Closing connection.')
-                    ws.close()
+                    print('Error: unexpected response header.')
                     return
                 self.cur_hypothesis = response_dict['Text']
                 print('Current hypothesis: ' + self.cur_hypothesis)
             elif response_path == 'speech.phrase':
                 response_dict = utils.parse_body_json(response)
                 if response_dict is None:
-                    print('Error: no body found in the response. Closing connection.')
-                    ws.close()
+                    print('Error: no body found in the response.')
                     return
                 if 'RecognitionStatus' not in response_dict:
-                    print('Error: unexpected response header. Closing connection.')
-                    ws.close()
+                    print('Error: unexpected response header.')
                     return
                 if response_dict['RecognitionStatus'] == 'Success':
                     if self.response_format == 'simple':
                         if 'DisplayText' not in response_dict:
-                            print('Error: unexpected response header. Closing connection.')
-                            ws.close()
+                            print('Error: unexpected response header.')
                             return
                         self.phrase = response_dict['DisplayText']
                     elif self.response_format == 'detailed':
                         if 'NBest' not in response_dict or 'Display' not in response_dict['NBest'][0]:
-                            print('Error: unexpected response header. Closing connection.')
-                            ws.close()
+                            print('Error: unexpected response header.')
                             return
                         self.phrase = response_dict['NBest'][0]['Display']
                     else:
-                        print('Error: unexpected response format. Closing connection.')
-                        ws.close()
+                        print('Error: unexpected response format.')
                         return
             elif response_path == 'speech.endDetected':
                 pass
@@ -250,11 +265,10 @@ class SpeechClient:
                 self.is_ongoing_turn = False
                 break
             else:
-                print('Error: unexpected response type (Path header). Closing connection.')
-                ws.close()
+                print('Error: unexpected response type (Path header).')
                 return
 
-        await self.send_telemetry_data(ws, is_first_turn=(self.num_turns == 1))
+        await self.send_telemetry_msg(is_first_turn=(self.num_turns == 1))
 
 
     # ---- PRIVATE METHODS ----
@@ -300,20 +314,66 @@ def main():
     # recognition_mode = 'conversation'
     # recognition_mode = 'dictation'
     audio_file_path = 'data/whatstheweatherlike.wav'
-    # audio_file_path = 'data/test.wav'
+    # audio_file_path2 = 'data/test.wav'
 
 
     client = SpeechClient(sys.argv[1])
 
+    # start the event loop and initialize the speech client
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(client.speech_to_text(language, response_format, recognition_mode, audio_file_path))
-    loop.close()
+    loop.run_until_complete(client.connect_to_speech_api(language, response_format, recognition_mode))
+
+    # query the speech API
+    output = loop.run_until_complete(client.speech_to_text(audio_file_path))
 
     # print the result
-    if client.phrase != '':
-        print('\nRecognized phrase: ' + client.phrase)
+    if output != '':
+        print('\nRecognized phrase: ' + output)
     else:
         print('\nSorry, we were unable to recognize the utterance.')
+
+    # client.reset()
+    # loop.run_until_complete(client.speech_to_text(audio_file_path))
+
+    # close the connection and stop the event loop
+    loop.run_until_complete(client.disconnect())
+    loop.close()
+
+
+@asyncio.coroutine
+def start(api_key, language, response_format, recognition_mode, audio_file_path):
+    if api_key is None:
+        print('Please, provide your key to access the Bing Speech API.')
+        exit()
+
+    print('>> KEY ' + api_key)
+
+
+    client = SpeechClient(api_key)
+
+    # start the event loop and initialize the speech client
+    loop = asyncio.get_event_loop()
+    # asyncio.set_event_loop(loop)
+
+    loop.run_until_complete(client.connect_to_speech_api(language, response_format, recognition_mode))
+
+    # query the speech API
+    output = loop.run_until_complete(client.speech_to_text(audio_file_path))
+
+    # print the result
+    if output != '':
+        print('\nRecognized phrase: ' + output)
+    else:
+        print('\nSorry, we were unable to recognize the utterance.')
+
+    # client.reset()
+    # loop.run_until_complete(client.speech_to_text(audio_file_path))
+
+    # close the connection and stop the event loop
+    #loop.run_until_complete(client.disconnect())
+    loop.close()
+
+    return output
 
 @asyncio.coroutine
 def start(api_key,language, response_format,recognition_mode, audio_file_path):

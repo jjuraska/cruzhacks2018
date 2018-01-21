@@ -20,6 +20,9 @@ def obtain_auth_token(api_key):
 
     if response.status_code == 200:
         data = response.text
+    elif response.status_code == 403 or response.status_code == 401:
+        print('Error: access denied. Please, make sure you provided a valid API key.')
+        exit()
     else:
         response.raise_for_status()
 
