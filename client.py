@@ -22,6 +22,9 @@ class SpeechClient:
         self.endpoint_conversation = r'wss://speech.platform.bing.com/speech/recognition/conversation/cognitiveservices/v1'
         self.endpoint_dictation = r'wss://speech.platform.bing.com/speech/recognition/dictation/cognitiveservices/v1'
 
+        self.language = 'en-US'
+        self.response_format = 'simple'
+
         self.chunk_size = 8192
         self.is_ongoing_turn = False
         self.cur_hypothesis = ''
@@ -31,8 +34,10 @@ class SpeechClient:
     # ---- PUBLIC METHODS ----
 
     async def send_stt_request(self, language, response_format, audio_file_path):
+        self.language = language
+        self.response_format = response_format
 
-        url = self.endpoint_interactive + '?language={0}&format={1}'.format(language, response_format)
+        url = self.endpoint_interactive + '?language={0}&format={1}'.format(self.language, self.response_format)
         headers = {'Authorization': 'Bearer ' + self.auth_token,
                    'X-ConnectionId': self.connection_id}
 
@@ -156,11 +161,22 @@ class SpeechClient:
                     ws.close()
                     return
                 if response_dict['RecognitionStatus'] == 'Success':
-                    if 'DisplayText' not in response_dict:
-                        print('Error: unexpected response header. Closing connection.')
+                    if self.response_format == 'simple':
+                        if 'DisplayText' not in response_dict:
+                            print('Error: unexpected response header. Closing connection.')
+                            ws.close()
+                            return
+                        self.phrase = response_dict['DisplayText']
+                    elif self.response_format == 'detailed':
+                        if 'NBest' not in response_dict or 'Display' not in response_dict['NBest'][0]:
+                            print('Error: unexpected response header. Closing connection.')
+                            ws.close()
+                            return
+                        self.phrase = response_dict['NBest'][0]['Display']
+                    else:
+                        print('Error: unexpected response format. Closing connection.')
                         ws.close()
                         return
-                    self.phrase = response_dict['DisplayText']
             elif response_path == 'speech.endDetected':
                 pass
             elif response_path == 'turn.end':
@@ -230,14 +246,16 @@ class SpeechClient:
         return body_dict
 
 
-if __name__ == '__main__':
+# ---- MAIN ----
+
+def main():
     if len(sys.argv) != 2:
         print('Please, provide your key to access the Bing Speech API.')
         exit()
 
     language = 'en-US'
-    response_format = 'simple'
-    # response_format = 'detailed'
+    # response_format = 'simple'
+    response_format = 'detailed'
     audio_file_path = 'data/whatstheweatherlike.wav'
     # audio_file_path = 'data/test.wav'
 
@@ -251,3 +269,7 @@ if __name__ == '__main__':
         print('\nRecognized phrase: ' + client.phrase)
     else:
         print('\nSorry, we were unable to recognize the utterance.')
+
+
+if __name__ == '__main__':
+    main()
