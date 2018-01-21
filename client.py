@@ -1,22 +1,20 @@
 import sys
 import json
-import uuid
-import datetime
 import platform
-import requests
-import websockets
 import asyncio
-from threading import Thread
+import websockets
+
+import utils
 
 
 class SpeechClient:
     # ---- CONSTRUCTOR ----
 
     def __init__(self, api_key):
-        self.uuid = self.__generate_id()
-        self.connection_id = self.__generate_id()
-        self.request_id = self.__generate_id()
-        self.auth_token = self.__obtain_auth_token(api_key)
+        self.uuid = utils.generate_id()
+        self.connection_id = utils.generate_id()
+        self.request_id = utils.generate_id()
+        self.auth_token = utils.obtain_auth_token(api_key)
 
         self.endpoint_interactive = r'wss://speech.platform.bing.com/speech/recognition/interactive/cognitiveservices/v1'
         self.endpoint_conversation = r'wss://speech.platform.bing.com/speech/recognition/conversation/cognitiveservices/v1'
@@ -26,9 +24,13 @@ class SpeechClient:
         self.response_format = 'simple'
 
         self.chunk_size = 8192
+
+        self.num_turns = 0
         self.is_ongoing_turn = False
         self.cur_hypothesis = ''
         self.phrase = ''
+        self.received_messages = []
+        self.metrics = []
 
 
     # ---- PUBLIC METHODS ----
@@ -41,15 +43,25 @@ class SpeechClient:
         headers = {'Authorization': 'Bearer ' + self.auth_token,
                    'X-ConnectionId': self.connection_id}
 
-        async with websockets.client.connect(url, extra_headers=headers) as ws:
-            try:
-                ws.handshake(url, origin='https://speech.platform.bing.com')
-                # DEBUG PRINT
-                # print('Handshake successful!')
-                # print(ws.host)
-            except websockets.exceptions.InvalidHandshake as e:
-                print('Handshake error: {0}'.format(e))
+        # record the Connection metric telemetry data
+        self.metrics.append({
+            'Name': 'Connection',
+            'Id': self.connection_id,
+            'Start': utils.generate_timestamp()
+        })
 
+        async with websockets.client.connect(url, extra_headers=headers) as ws:
+            # TODO: catch connection errors, and add Connection failure telemetry for error cases
+
+            # record the Connection metric telemetry data
+            self.metrics[-1]['End'] = utils.generate_timestamp()
+
+            # try:
+            #     ws.handshake(url, origin='https://speech.platform.bing.com')
+            # except websockets.exceptions.InvalidHandshake as e:
+            #     print('Handshake error: {0}'.format(e))
+
+            # assemble the payload for the speech.config message
             context = {
                 'system': {
                     'version': '5.4'
@@ -67,22 +79,24 @@ class SpeechClient:
             }
             payload = {'context': context}
 
-            # assemble the header for the speech-config message
+            # assemble the header for the speech.config message
             msg = 'Path: speech.config\r\n'
             msg += 'Content-Type: application/json; charset=utf-8\r\n'
-            msg += 'X-Timestamp: ' + str(datetime.datetime.now())[:-3] + 'Z\r\n'
+            msg += 'X-Timestamp: ' + utils.generate_timestamp() + '\r\n'
             # append the body of the message
-            msg += '\r\n' + json.dumps(payload)
+            msg += '\r\n' + json.dumps(payload, indent=2)
 
             # DEBUG PRINT
             # print('>>', msg)
 
-            await ws.send(msg)
+            # send the speech.config message
+            ws.send(msg)
 
-            producer_task = asyncio.ensure_future(self.send_audio_msg(ws, audio_file_path))
-            consumer_task = asyncio.ensure_future(self.process_response(ws))
+            #
+            send_task = asyncio.ensure_future(self.send_audio_msg(ws, audio_file_path))
+            receive_task = asyncio.ensure_future(self.process_response(ws))
             await asyncio.wait(
-                [producer_task, consumer_task],
+                [send_task, receive_task],
                 return_when=asyncio.ALL_COMPLETED,
             )
 
@@ -100,7 +114,7 @@ class SpeechClient:
                 msg = b'Path: audio\r\n'
                 msg += b'Content-Type: audio/x-wav\r\n'
                 msg += b'X-RequestId: ' + bytearray(self.request_id, 'ascii') + b'\r\n'
-                msg += b'X-Timestamp: ' + bytearray(str(datetime.datetime.now())[:-3], 'ascii') + b'Z\r\n'
+                msg += b'X-Timestamp: ' + bytearray(utils.generate_timestamp(), 'ascii') + b'\r\n'
                 # prepend the length of the header in 2-byte big-endian format
                 msg = len(msg).to_bytes(2, byteorder='big') + msg
                 # append the body of the message
@@ -112,34 +126,68 @@ class SpeechClient:
 
                 try:
                     await ws.send(msg)
+                    # DEBUG CONCURRENCY
+                    # await asyncio.sleep(0.1)
                 except websockets.exceptions.ConnectionClosed as e:
                     print('Connection closed: {0}'.format(e))
                     return
+
+
+    async def send_telemetry_data(self, ws, is_first_turn=False):
+        # assemble the payload for the telemetry message
+        payload = {
+            'ReceivedMessages': self.received_messages
+        }
+        if is_first_turn:
+            payload['Metrics'] = self.metrics
+
+        # assemble the header for the speech.config message
+        msg = 'Path: telemetry\r\n'
+        msg += 'Content-Type: application/json; charset=utf-8\r\n'
+        msg += 'X-RequestId: ' + self.request_id + '\r\n'
+        msg += 'X-Timestamp: ' + utils.generate_timestamp() + '\r\n'
+        # append the body of the message
+        msg += '\r\n' + json.dumps(payload, indent=2)
+
+        # DEBUG PRINT
+        print('>>', msg)
+        sys.stdout.flush()
+
+        try:
+            await ws.send(msg)
+        except websockets.exceptions.ConnectionClosed as e:
+            print('Connection closed: {0}'.format(e))
+            return
 
 
     async def process_response(self, ws):
         while True:
             try:
                 response = await ws.recv()
-                print('<<', str(datetime.datetime.now())[:-3] + 'Z\r\n' + response)
+                # DEBUG PRINT
+                print('<<', utils.generate_timestamp() + '\r\n' + response)
                 sys.stdout.flush()
             except websockets.exceptions.ConnectionClosed as e:
                 print('Connection closed: {0}'.format(e))
                 return
 
             # identify the type of response
-            response_path = self.__parse_header_value(response, 'Path')
+            response_path = utils.parse_header_value(response, 'Path')
             if response_path is None:
                 print('Error: invalid response header.')
                 ws.close()
                 return
 
+            # record the telemetry data for received messages
+            self.__record_telemetry(response_path)
+
             if response_path == 'turn.start':
                 self.is_ongoing_turn = True
+                self.num_turns += 1
             elif response_path == 'speech.startDetected':
                 pass
             elif response_path == 'speech.hypothesis':
-                response_dict = self.__parse_body_json(response)
+                response_dict = utils.parse_body_json(response)
                 if response_dict is None:
                     print('Error: no body found in the response. Closing connection.')
                     ws.close()
@@ -151,7 +199,7 @@ class SpeechClient:
                 self.cur_hypothesis = response_dict['Text']
                 print('Current hypothesis: ' + self.cur_hypothesis)
             elif response_path == 'speech.phrase':
-                response_dict = self.__parse_body_json(response)
+                response_dict = utils.parse_body_json(response)
                 if response_dict is None:
                     print('Error: no body found in the response. Closing connection.')
                     ws.close()
@@ -187,63 +235,25 @@ class SpeechClient:
                 ws.close()
                 return
 
+        await self.send_telemetry_data(ws, is_first_turn=(self.num_turns == 1))
+
 
     # ---- PRIVATE METHODS ----
 
-    def __obtain_auth_token(self, api_key):
-        url = 'https://api.cognitive.microsoft.com/sts/v1.0/issueToken'
-        headers = {
-            'Content-type': 'application/x-www-form-urlencoded',
-            'Content-Length': '0',
-            'Ocp-Apim-Subscription-Key': api_key
-        }
-
-        r = requests.post(url, headers=headers)
-
-        # DEBUG PRINT
-        # print(r.headers['content-type'])
-        # print(r.encoding)
-        # print(r.text)
-
-        if r.status_code == 200:
-            data = r.text
+    def __record_telemetry(self, response_path):
+        # if a single message of a certain type, store the value directly
+        if response_path not in [next(iter(msg.keys())) for msg in self.received_messages]:
+            self.received_messages.append({
+                response_path: utils.generate_timestamp()
+            })
+        # if multiple messages of a certain type, store the values in a list
         else:
-            r.raise_for_status()
-
-        return data
-
-
-    def __generate_id(self):
-        return str(uuid.uuid4()).replace('-', '')
-
-
-    def __parse_header_value(self, r, header_to_find):
-        for line in r.split('\r\n'):
-            if len(line) == 0:
-                break
-            header_name = header_to_find + ':'
-            if line.startswith(header_name):
-                return line[len(header_name):].strip()
-
-        return None
-
-
-    def __parse_body_json(self, r):
-        body_str = ''
-        body_dict = None
-
-        r_as_lines = r.split('\r\n')
-        for i, line in enumerate(r_as_lines):
-            if len(line) == 0:
-                if i < len(r_as_lines) - 1:
-                    # load the lines from the header-body separator until the end (corresponding to a JSON) into a dictionary
-                    try:
-                        body_dict = json.loads('\n'.join(r_as_lines[(i + 1):]))
-                    except json.JSONDecodeError as e:
-                        print('JSON Decode Error: {0}.'.format(e))
-                break
-
-        return body_dict
+            for i, msg in enumerate(self.received_messages):
+                if next(iter(msg.keys())) == response_path:
+                    if not isinstance(msg[response_path], list):
+                        self.received_messages[i][response_path] = [msg[response_path]]
+                    self.received_messages[i][response_path].append(utils.generate_timestamp())
+                    break
 
 
 # ---- MAIN ----
