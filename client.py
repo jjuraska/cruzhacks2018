@@ -1,9 +1,11 @@
 import sys
+import os
 import json
 import platform
 import asyncio
 import websockets
 
+from audio_recorder import AudioRecorder
 import utils
 
 
@@ -162,8 +164,8 @@ class SpeechClient:
                 msg += b'\r\n' + audio_chunk
 
                 # DEBUG PRINT
-                print('>>', msg)
-                sys.stdout.flush()
+                # print('>>', msg)
+                # sys.stdout.flush()
 
                 try:
                     await self.ws.send(msg)
@@ -191,8 +193,8 @@ class SpeechClient:
         msg += '\r\n' + json.dumps(payload, indent=2)
 
         # DEBUG PRINT
-        print('>>', msg)
-        sys.stdout.flush()
+        # print('>>', msg)
+        # sys.stdout.flush()
 
         try:
             await self.ws.send(msg)
@@ -206,8 +208,8 @@ class SpeechClient:
             try:
                 response = await self.ws.recv()
                 # DEBUG PRINT
-                print('<<', utils.generate_timestamp() + '\r\n' + response)
-                sys.stdout.flush()
+                # print('<<', utils.generate_timestamp() + '\r\n' + response)
+                # sys.stdout.flush()
             except websockets.exceptions.ConnectionClosed as e:
                 print('Connection closed: {0}'.format(e))
                 return
@@ -302,21 +304,41 @@ class SpeechClient:
 # ---- MAIN ----
 
 def main():
-    if len(sys.argv) != 2:
-        print('Please, provide your key to access the Bing Speech API.')
+    ''' Entry point when started from the command line.
+    '''
+
+    if len(sys.argv) < 5:
+        print('Please, provide the following arguments, and try again:')
+        print('\t-> Bing Speech API key (obtain from your Microsoft Azure account)')
+        print('\t-> Language (e.g. en-US)')
+        print('\t-> Response format [simple/detailed]')
+        print('\t-> Recognition mode [interactive/conversation/dictation]')
+        print('\t-> [optional] Path to an audio recording (must be WAV, 16-bit, 16kHz)')
         exit()
 
-    language = 'en-US'
-    # response_format = 'simple'
-    response_format = 'detailed'
-    recognition_mode = 'interactive'
-    # recognition_mode = 'conversation'
-    # recognition_mode = 'dictation'
-    audio_file_path = 'data/whatstheweatherlike.wav'
-    # audio_file_path2 = 'data/test.wav'
+    api_key = sys.argv[1]
+    language = sys.argv[2]
+    response_format = sys.argv[3]
+    recognition_mode = sys.argv[4]
+
+    if len(sys.argv) == 6:
+        audio_file_path = sys.argv[5]
+        if not os.path.isfile(audio_file_path):
+            print('Error: file does not exist.')
+            exit()
+    else:
+        # prompt the user to create a recording
+        record_response = input('\nYou did not provide an audio file. Are you ready to record the query? (You will have 10 seconds.) [Y/n]')
+        if record_response.lower() != 'y' and len(record_response) > 0:
+            exit()
+
+        # record the audio
+        rec = AudioRecorder()
+        audio_file_path = rec.start()
 
 
-    client = SpeechClient(sys.argv[1])
+    client = SpeechClient(api_key)
+    print('\nProcessing...\n')
 
     # start the event loop and initialize the speech client
     loop = asyncio.get_event_loop()
@@ -327,9 +349,9 @@ def main():
 
     # print the result
     if output != '':
-        print('\nRecognized phrase: ' + output)
+        print('\n>> Recognized phrase: ' + output + '\n')
     else:
-        print('\nSorry, we were unable to recognize the utterance.')
+        print('\n>> Sorry, we were unable to recognize the utterance.\n')
 
     # client.reset()
     # loop.run_until_complete(client.speech_to_text(audio_file_path))
@@ -341,10 +363,12 @@ def main():
 
 @asyncio.coroutine
 def start(api_key, language, response_format, recognition_mode, audio_file_path):
+    ''' Entry point when used with the web interface.
+    '''
+
     if api_key is None:
         print('Please, provide your key to access the Bing Speech API.')
         exit()
-
 
     client = SpeechClient(api_key)
 
@@ -371,6 +395,7 @@ def start(api_key, language, response_format, recognition_mode, audio_file_path)
     loop.close()
 
     return output
+
 
 if __name__ == '__main__':
     main()
