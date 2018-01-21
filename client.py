@@ -22,6 +22,7 @@ class SpeechClient:
 
         self.language = 'en-US'
         self.response_format = 'simple'
+        self.recognition_mode = 'interactive'
 
         self.chunk_size = 8192
 
@@ -35,13 +36,23 @@ class SpeechClient:
 
     # ---- PUBLIC METHODS ----
 
-    async def send_stt_request(self, language, response_format, audio_file_path):
+    async def speech_to_text(self, language, response_format, recognition_mode, audio_file_path):
         self.language = language
         self.response_format = response_format
+        self.recognition_mode = recognition_mode
 
-        url = self.endpoint_interactive + '?language={0}&format={1}'.format(self.language, self.response_format)
-        headers = {'Authorization': 'Bearer ' + self.auth_token,
-                   'X-ConnectionId': self.connection_id}
+        # determine the endpoint based on the selected recognition mode
+        endpoint = self.__get_cur_endpoint()
+        if endpoint is None:
+            print('Error: invalid recognition mode.')
+            return
+
+        # assemble the URL and the headers for the connection request
+        url = endpoint + '?language={0}&format={1}'.format(self.language, self.response_format)
+        headers = {
+            'Authorization': 'Bearer ' + self.auth_token,
+            'X-ConnectionId': self.connection_id
+        }
 
         # record the Connection metric telemetry data
         self.metrics.append({
@@ -50,6 +61,7 @@ class SpeechClient:
             'Start': utils.generate_timestamp()
         })
 
+        # request a WebSocket connection to the Bing Speech API
         async with websockets.client.connect(url, extra_headers=headers) as ws:
             # TODO: catch connection errors, and add Connection failure telemetry for error cases
 
@@ -61,50 +73,57 @@ class SpeechClient:
             # except websockets.exceptions.InvalidHandshake as e:
             #     print('Handshake error: {0}'.format(e))
 
-            # assemble the payload for the speech.config message
-            context = {
-                'system': {
-                    'version': '5.4'
-                },
-                'os': {
-                    'platform': platform.system(),
-                    'name': platform.system() + ' ' + platform.version(),
-                    'version': platform.version()
-                },
-                'device': {
-                    'manufacturer': 'SpeechSample',
-                    'model': 'SpeechSample',
-                    'version': '1.0.00000'
-                }
-            }
-            payload = {'context': context}
-
-            # assemble the header for the speech.config message
-            msg = 'Path: speech.config\r\n'
-            msg += 'Content-Type: application/json; charset=utf-8\r\n'
-            msg += 'X-Timestamp: ' + utils.generate_timestamp() + '\r\n'
-            # append the body of the message
-            msg += '\r\n' + json.dumps(payload, indent=2)
-
-            # DEBUG PRINT
-            # print('>>', msg)
-
             # send the speech.config message
-            ws.send(msg)
+            await self.send_speech_config_msg(ws)
 
-            #
-            send_task = asyncio.ensure_future(self.send_audio_msg(ws, audio_file_path))
-            receive_task = asyncio.ensure_future(self.process_response(ws))
+            # perform the sending and receiving via the WebSocket concurrently
+            sending_task = asyncio.ensure_future(self.send_audio_msg(ws, audio_file_path))
+            receiving_task = asyncio.ensure_future(self.process_response(ws))
+            # wait for both the tasks to complete
             await asyncio.wait(
-                [send_task, receive_task],
+                [sending_task, receiving_task],
                 return_when=asyncio.ALL_COMPLETED,
             )
 
 
+    async def send_speech_config_msg(self, ws):
+        # assemble the payload for the speech.config message
+        context = {
+            'system': {
+                'version': '5.4'
+            },
+            'os': {
+                'platform': platform.system(),
+                'name': platform.system() + ' ' + platform.version(),
+                'version': platform.version()
+            },
+            'device': {
+                'manufacturer': 'SpeechSample',
+                'model': 'SpeechSample',
+                'version': '1.0.00000'
+            }
+        }
+        payload = {'context': context}
+
+        # assemble the header for the speech.config message
+        msg = 'Path: speech.config\r\n'
+        msg += 'Content-Type: application/json; charset=utf-8\r\n'
+        msg += 'X-Timestamp: ' + utils.generate_timestamp() + '\r\n'
+        # append the body of the message
+        msg += '\r\n' + json.dumps(payload, indent=2)
+
+        # DEBUG PRINT
+        # print('>>', msg)
+
+        await ws.send(msg)
+
+
     async def send_audio_msg(self, ws, audio_file_path):
+        # open the binary audio file
         with open(audio_file_path, 'rb') as f_audio:
             num_chunks = 0
             while True:
+                # read the audio file in small consecutive chunks
                 audio_chunk = f_audio.read(self.chunk_size)
                 if not audio_chunk:
                     break
@@ -240,6 +259,17 @@ class SpeechClient:
 
     # ---- PRIVATE METHODS ----
 
+    def __get_cur_endpoint(self):
+        if self.recognition_mode == 'interactive':
+            return self.endpoint_interactive
+        elif self.recognition_mode == 'conversation':
+            return self.endpoint_conversation
+        elif self.recognition_mode == 'dictation':
+            return self.endpoint_dictation
+        else:
+            return None
+
+
     def __record_telemetry(self, response_path):
         # if a single message of a certain type, store the value directly
         if response_path not in [next(iter(msg.keys())) for msg in self.received_messages]:
@@ -266,15 +296,20 @@ def main():
     language = 'en-US'
     # response_format = 'simple'
     response_format = 'detailed'
+    recognition_mode = 'interactive'
+    # recognition_mode = 'conversation'
+    # recognition_mode = 'dictation'
     audio_file_path = 'data/whatstheweatherlike.wav'
     # audio_file_path = 'data/test.wav'
+
 
     client = SpeechClient(sys.argv[1])
 
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(client.send_stt_request(language, response_format, audio_file_path))
+    loop.run_until_complete(client.speech_to_text(language, response_format, recognition_mode, audio_file_path))
     loop.close()
 
+    # print the result
     if client.phrase != '':
         print('\nRecognized phrase: ' + client.phrase)
     else:
