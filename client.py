@@ -315,6 +315,29 @@ def main():
     else:
         print('\nSorry, we were unable to recognize the utterance.')
 
+def start(api_key,language, response_format, audio_file_path):
+    if api_key is None:
+        print('Please, provide your key to access the Bing Speech API.')
+        exit()
+
+    #language = 'en-US'
+    # response_format = 'simple'
+    #response_format = 'detailed'
+    #audio_file_path = 'data/whatstheweatherlike.wav'
+    # audio_file_path = 'data/test.wav'
+
+    client = SpeechClient(api_key)
+
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(client.send_stt_request(language, response_format, audio_file_path))
+    loop.close()
+
+    if client.phrase != '':
+        print('\nRecognized phrase: ' + client.phrase)
+    else:
+        print('\nSorry, we were unable to recognize the utterance.')
+    return client.phrase
 
 if __name__ == '__main__':
     main()
