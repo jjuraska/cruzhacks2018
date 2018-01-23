@@ -1,4 +1,4 @@
-# Python Speech-to-Text Client (CruzHacks 2018)
+# Python Speech-to-Text Client
 
 Python client library for the cloud-based Speech API to transcribe a spoken utterance to text. The asynchronous communication with the service uses the WebSocket protocol enabling real-time speech recognition.
 
@@ -16,7 +16,7 @@ python3 client.py [your_api_key] [lang_code] [response_type] [recognition_mode] 
 
 ## The Story Behind the Project
 
-The winning project in the "Microsoft Invoke Cortana's Best Speech Client Implementation" category of the CruzHacks hackathon that took place from Jan 19 to Jan 21 at the University of California, Santa Cruz.
+The winning project in the "Microsoft Invoke Cortana's Best Speech Client Implementation" category of the CruzHacks hackathon that took place from Jan 19 to Jan 21 2018 at the University of California, Santa Cruz.
 
 #### Inspiration
 
