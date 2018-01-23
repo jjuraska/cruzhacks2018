@@ -28,12 +28,12 @@ def my_link():
     inputSource = request.form["inputSource"]
     app.logger.info(key)
     #result=hello()
-    phrase= yield client.start(key,language,formatOptions,recognitionMode,audio_file_path)
+    phrase= client.start(key,language,formatOptions,recognitionMode,audio_file_path)
     #store=session.get('store')
     if phrase=='':
         app.logger.info("blank")
     else:
-        app.logger.info(next(phrase))
+        app.logger.info(phrase)
     return render_template('home_page.html')
 
 def hello():
