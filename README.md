@@ -2,6 +2,15 @@
 
 Python client library for the cloud-based Speech API to transcribe a spoken utterance to text. The asynchronous communication with the service uses the WebSocket protocol enabling real-time speech recognition.
 
+## Prerequisites
+
+The client is implemented in Python 3, and it requires the following packages to be installed before use:
+
+- websockets
+- asyncio
+- pyaudio
+- flask
+
 ## How to Use It
 
 ```
